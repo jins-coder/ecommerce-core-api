@@ -35,6 +35,16 @@ describe('Atomic Inventory Reservation Suite', () => {
     }
   });
 
+  it('should reject invalid quantities in commitReservation and releaseReservation', async () => {
+    await expect(
+      inventoryService.commitReservation([{ productId: 'prod_101', quantity: -5, unitPrice: 89.99 }])
+    ).rejects.toThrow(/positive integer/);
+
+    await expect(
+      inventoryService.releaseReservation([{ productId: 'prod_101', quantity: NaN, unitPrice: 89.99 }])
+    ).rejects.toThrow(/positive integer/);
+  });
+
   it('should aggregate duplicate line items for the same product to prevent overselling', async () => {
     const reservedBefore = db.inventory.get('prod_101')?.reservedStock || 0;
 
@@ -99,5 +109,35 @@ describe('Atomic Inventory Reservation Suite', () => {
 
     expect(item1After).toBe(item1Before);
     expect(item2After).toBe(item2Before);
+  });
+
+  it('should actively record and surface compensation write failures when rollback compensation itself fails', async () => {
+    const originalSet = db.inventory.set.bind(db.inventory);
+    let writeCount = 0;
+
+    // 1st write succeeds for prod_101
+    // 2nd write fails for prod_102 -> triggers rollback loop
+    // 3rd write fails during prod_101 compensation -> triggers compensationErrors path
+    const setSpy = vi.spyOn(db.inventory, 'set').mockImplementation((key, value) => {
+      writeCount++;
+      if (writeCount === 2) {
+        throw new Error('Initial persistence failure on item 2');
+      }
+      if (writeCount === 3) {
+        throw new Error('Disk I/O error during rollback compensation write');
+      }
+      return originalSet(key, value);
+    });
+
+    const result = await inventoryService.reserveItemsAtomic([
+      { productId: 'prod_101', quantity: 2, unitPrice: 89.99 },
+      { productId: 'prod_102', quantity: 2, unitPrice: 49.99 },
+    ]);
+
+    setSpy.mockRestore();
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('Rollback compensation incomplete');
+    expect(result.error).toContain('Failed to compensate reservation on prod_101');
   });
 });

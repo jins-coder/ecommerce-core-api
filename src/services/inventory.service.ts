@@ -1,6 +1,12 @@
 import { db } from '../utils/db.js';
 import { InventoryItem, OrderItem } from '../models/types.js';
 
+function assertValidQuantity(item: OrderItem): void {
+  if (!item || typeof item.quantity !== 'number' || !Number.isInteger(item.quantity) || item.quantity <= 0) {
+    throw new Error(`Invalid quantity for item ${item?.productId || 'unknown'}: must be a positive integer`);
+  }
+}
+
 export class InventoryService {
   async getStock(productId: string): Promise<InventoryItem | null> {
     return db.inventory.get(productId) || null;
@@ -17,9 +23,7 @@ export class InventoryService {
       // Step 1: Aggregate duplicate line items and strictly validate quantities
       const aggregated = new Map<string, number>();
       for (const item of items) {
-        if (!item || typeof item.quantity !== 'number' || !Number.isInteger(item.quantity) || item.quantity <= 0) {
-          throw new Error(`Invalid quantity for item ${item?.productId || 'unknown'}: must be a positive integer`);
-        }
+        assertValidQuantity(item);
         aggregated.set(item.productId, (aggregated.get(item.productId) || 0) + item.quantity);
       }
 
@@ -97,6 +101,7 @@ export class InventoryService {
    */
   async commitReservation(items: OrderItem[]): Promise<void> {
     for (const item of items) {
+      assertValidQuantity(item);
       const stockItem = db.inventory.get(item.productId);
       if (stockItem) {
         stockItem.availableStock = Math.max(0, stockItem.availableStock - item.quantity);
@@ -113,6 +118,7 @@ export class InventoryService {
    */
   async releaseReservation(items: OrderItem[]): Promise<void> {
     for (const item of items) {
+      assertValidQuantity(item);
       const stockItem = db.inventory.get(item.productId);
       if (stockItem) {
         stockItem.reservedStock = Math.max(0, stockItem.reservedStock - item.quantity);
