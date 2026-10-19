@@ -20,7 +20,7 @@ export class InventoryService {
     const rollbackLog: { productId: string; quantity: number }[] = [];
 
     try {
-      // Step 1: Aggregate duplicate line items and strictly validate quantities
+      // Step 1: Aggregate duplicate line items and strictly validate quantities upfront
       const aggregated = new Map<string, number>();
       for (const item of items) {
         assertValidQuantity(item);
@@ -98,10 +98,16 @@ export class InventoryService {
 
   /**
    * Finalizes reservation into permanent stock deduction upon successful order completion.
+   * Validates all items upfront before applying deductions to prevent partial commits.
    */
   async commitReservation(items: OrderItem[]): Promise<void> {
+    // Step 1: Pre-validate all items to ensure zero partial mutations
     for (const item of items) {
       assertValidQuantity(item);
+    }
+
+    // Step 2: Apply mutations
+    for (const item of items) {
       const stockItem = db.inventory.get(item.productId);
       if (stockItem) {
         stockItem.availableStock = Math.max(0, stockItem.availableStock - item.quantity);
@@ -115,10 +121,16 @@ export class InventoryService {
 
   /**
    * Explicitly releases reserved items if order or payment gets cancelled.
+   * Validates all items upfront before applying releases.
    */
   async releaseReservation(items: OrderItem[]): Promise<void> {
+    // Step 1: Pre-validate all items upfront
     for (const item of items) {
       assertValidQuantity(item);
+    }
+
+    // Step 2: Apply releases
+    for (const item of items) {
       const stockItem = db.inventory.get(item.productId);
       if (stockItem) {
         stockItem.reservedStock = Math.max(0, stockItem.reservedStock - item.quantity);
