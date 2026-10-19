@@ -1,6 +1,6 @@
 import express, { Express } from 'express';
 import cors from 'cors';
-import { loginHandler } from './controllers/auth.controller.js';
+import { loginHandler, logoutHandler } from './controllers/auth.controller.js';
 import { getProductsHandler, getProductByIdHandler } from './controllers/product.controller.js';
 import { createOrderHandler } from './controllers/order.controller.js';
 import { authenticate } from './middleware/auth.middleware.js';
@@ -18,6 +18,7 @@ export function createApp(): Express {
 
   // Auth routes
   app.post('/api/auth/login', loginHandler);
+  app.post('/api/auth/logout', authenticate as any, logoutHandler as any);
 
   // Product routes
   app.get('/api/products', getProductsHandler);
