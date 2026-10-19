@@ -19,7 +19,8 @@ export class ProductService {
     // Check Cache-Aside layer
     const cached = memoryCache.get<ProductWithInventory[]>(CATALOG_CACHE_KEY);
     if (cached) {
-      return cached;
+      // Return a defensive copy to prevent callers from corrupting cached data
+      return cached.map((p) => ({ ...p }));
     }
 
     const products = Array.from(db.products.values());
@@ -35,7 +36,7 @@ export class ProductService {
 
     // Cache computed results
     memoryCache.set(CATALOG_CACHE_KEY, results, CACHE_TTL_SECONDS);
-    return results;
+    return results.map((p) => ({ ...p }));
   }
 
   async getProductById(id: string): Promise<ProductWithInventory | null> {
