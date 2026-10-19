@@ -7,7 +7,7 @@ export async function getProductsHandler(req: Request, res: Response): Promise<v
 }
 
 export async function getProductByIdHandler(req: Request, res: Response): Promise<void> {
-  const { id } = req.params;
+  const id = String(req.params.id);
   const product = await productService.getProductById(id);
 
   if (!product) {
