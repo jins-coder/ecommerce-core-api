@@ -19,8 +19,8 @@ export class ProductService {
     // Check Cache-Aside layer
     const cached = memoryCache.get<ProductWithInventory[]>(CATALOG_CACHE_KEY);
     if (cached) {
-      // Return a defensive copy to prevent callers from corrupting cached data
-      return cached.map((p) => ({ ...p }));
+      // Deep clone to prevent callers from corrupting nested structures like tags: string[]
+      return structuredClone(cached);
     }
 
     const products = Array.from(db.products.values());
@@ -36,7 +36,7 @@ export class ProductService {
 
     // Cache computed results
     memoryCache.set(CATALOG_CACHE_KEY, results, CACHE_TTL_SECONDS);
-    return results.map((p) => ({ ...p }));
+    return structuredClone(results);
   }
 
   async getProductById(id: string): Promise<ProductWithInventory | null> {

@@ -5,7 +5,7 @@ import { memoryCache } from '../src/utils/cache.js';
 import { db } from '../src/utils/db.js';
 
 describe('Product Catalog Cache & Optimization Suite', () => {
-  it('should serve from cache on second fetch without querying inventory service, and return defensive copies', async () => {
+  it('should serve from cache on second fetch without querying inventory service, and return deep copies', async () => {
     productService.invalidateCatalogCache();
 
     const batchSpy = vi.spyOn(inventoryService, 'getBatchStock');
@@ -20,11 +20,14 @@ describe('Product Catalog Cache & Optimization Suite', () => {
     expect(batchSpy).toHaveBeenCalledTimes(1);
     expect(secondRun).toEqual(firstRun);
 
-    // Verify defensive copying: mutations to firstRun do not corrupt cache
+    // Verify deep clone protection on nested arrays (tags): mutations to firstRun do not corrupt cache
+    firstRun[0].tags.push('mutated_tag_injection');
     firstRun[0].title = 'Tampered Catalog Title';
+
     const thirdRun = await productService.getAllProducts();
     expect(thirdRun[0].title).not.toBe('Tampered Catalog Title');
-    expect(secondRun).not.toBe(thirdRun); // References are distinct objects
+    expect(thirdRun[0].tags).not.toContain('mutated_tag_injection');
+    expect(secondRun[0].tags).not.toBe(thirdRun[0].tags); // Deep reference isolation
 
     batchSpy.mockRestore();
   });
@@ -44,6 +47,7 @@ describe('Product Catalog Cache & Optimization Suite', () => {
 
   it('should invalidate product cache when stock is deducted, but preserve cache when deduction fails', async () => {
     // Populate cache
+    productService.invalidateCatalogCache();
     await productService.getAllProducts();
     expect(memoryCache.get('products:catalog:all')).not.toBeNull();
 
@@ -59,34 +63,47 @@ describe('Product Catalog Cache & Optimization Suite', () => {
     expect(memoryCache.get('products:catalog:all')).toBeNull();
   });
 
-  it('should correctly test insufficient-stock boundary values and exact stock exhaustion', async () => {
+  it('should correctly test insufficient-stock boundary values and preserve cache on rejection', async () => {
     const item = db.inventory.get('prod_103')!;
     const initialAvailable = item.availableStock; // 25
 
-    // Boundary 1: Exceeding stock by 1 unit should fail
+    // Populate catalog cache
+    productService.invalidateCatalogCache();
+    await productService.getAllProducts();
+    expect(memoryCache.get('products:catalog:all')).not.toBeNull();
+
+    // Boundary 1: Exceeding stock by 1 unit should fail and preserve cache
     expect(await inventoryService.deductStock('prod_103', initialAvailable + 1)).toBe(false);
     expect(db.inventory.get('prod_103')?.availableStock).toBe(initialAvailable);
+    expect(memoryCache.get('products:catalog:all')).not.toBeNull();
 
-    // Boundary 2: Deducting exact stock amount should succeed and leave 0
+    // Boundary 2: Deducting exact stock amount should succeed, set stock to 0, and evict cache
     expect(await inventoryService.deductStock('prod_103', initialAvailable)).toBe(true);
     expect(db.inventory.get('prod_103')?.availableStock).toBe(0);
+    expect(memoryCache.get('products:catalog:all')).toBeNull();
 
     // Boundary 3: Deducting when stock is 0 should fail
     expect(await inventoryService.deductStock('prod_103', 1)).toBe(false);
   });
 
-  it('should reject invalid, negative, fractional, or NaN stock deductions and leave stock unchanged', async () => {
+  it('should reject invalid, negative, fractional, or NaN stock deductions and leave stock and cache unchanged', async () => {
+    productService.invalidateCatalogCache();
+    await productService.getAllProducts();
+    const cachedBefore = memoryCache.get('products:catalog:all');
+    expect(cachedBefore).not.toBeNull();
+
     const stockBefore = db.inventory.get('prod_102')?.availableStock || 0;
 
     expect(await inventoryService.deductStock('prod_102', -5)).toBe(false);
     expect(await inventoryService.deductStock('prod_102', NaN)).toBe(false);
     expect(await inventoryService.deductStock('prod_102', 0)).toBe(false);
-    expect(await inventoryService.deductStock('prod_102', 1.5)).toBe(false);
+    expect(await inventoryService.deductStock('prod_102', 1.5)).toBe(false); // fractional quantity check
     expect(await inventoryService.deductStock('prod_102', Infinity)).toBe(false);
     expect(await inventoryService.deductStock('prod_102', '5' as any)).toBe(false);
 
-    // Explicitly verify stock remains unchanged
+    // Explicitly verify stock and cache remain unchanged
     const stockAfter = db.inventory.get('prod_102')?.availableStock;
     expect(stockAfter).toBe(stockBefore);
+    expect(memoryCache.get('products:catalog:all')).toEqual(cachedBefore);
   });
 });
