@@ -2,11 +2,11 @@ import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import { db } from '../utils/db.js';
 import { User } from '../models/types.js';
-
-const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret-key-12345';
+import { JWT_SECRET } from '../config/env.js';
 
 export class AuthService {
-  private revokedTokens: Set<string> = new Set();
+  // Map token -> expiry timestamp in ms to enable automated eviction
+  private revokedTokens: Map<string, number> = new Map();
 
   async authenticateUser(email: string, passwordPlain: string): Promise<{ token: string; user: Omit<User, 'passwordHash'> } | null> {
     const users = Array.from(db.users.values());
@@ -33,12 +33,27 @@ export class AuthService {
     return { token, user: userWithoutPassword };
   }
 
-  async revokeToken(token: string): Promise<void> {
-    this.revokedTokens.add(token);
+  /**
+   * Revokes token with expiration TTL matching token lifespan (2 hours)
+   * Prevents unbounded in-memory leak by evicting stale tokens.
+   */
+  async revokeToken(token: string, ttlMs: number = 2 * 60 * 60 * 1000): Promise<void> {
+    this.pruneExpiredRevocations();
+    this.revokedTokens.set(token, Date.now() + ttlMs);
   }
 
   isTokenRevoked(token: string): boolean {
+    this.pruneExpiredRevocations();
     return this.revokedTokens.has(token);
+  }
+
+  pruneExpiredRevocations(): void {
+    const now = Date.now();
+    for (const [token, expiry] of this.revokedTokens.entries()) {
+      if (now > expiry) {
+        this.revokedTokens.delete(token);
+      }
+    }
   }
 
   async getUserById(userId: string): Promise<User | null> {

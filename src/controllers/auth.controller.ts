@@ -5,7 +5,7 @@ import { AuthenticatedRequest } from '../middleware/auth.middleware.js';
 
 const LoginSchema = z.object({
   email: z.string().trim().email('Invalid email address format'),
-  password: z.string().min(6, 'Password must be at least 6 characters').max(128, 'Password too long'),
+  password: z.string().min(1, 'Password is required').max(128, 'Password too long'),
 });
 
 export async function loginHandler(req: Request, res: Response): Promise<void> {
