@@ -70,6 +70,7 @@ export class InventoryService {
       return { success: true, reservedItems: rollbackLog };
     } catch (err: any) {
       // Automatic compensation / rollback of previously reserved items in this transaction
+      const compensationErrors: string[] = [];
       for (const logged of rollbackLog) {
         const stockItem = db.inventory.get(logged.productId);
         if (stockItem) {
@@ -77,13 +78,17 @@ export class InventoryService {
           stockItem.updatedAt = new Date().toISOString();
           try {
             db.inventory.set(logged.productId, stockItem);
-          } catch (_) {
-            // Safe guard in compensation loop
+          } catch (compErr: any) {
+            compensationErrors.push(`Failed to compensate reservation on ${logged.productId}: ${compErr.message}`);
           }
         }
       }
 
-      return { success: false, error: err.message };
+      const errorMessage = compensationErrors.length > 0
+        ? `${err.message} | Critical: Rollback compensation incomplete: ${compensationErrors.join(', ')}`
+        : err.message;
+
+      return { success: false, error: errorMessage };
     }
   }
 
