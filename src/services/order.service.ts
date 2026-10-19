@@ -8,34 +8,44 @@ export class OrderService {
       throw new Error('Order must contain at least one item');
     }
 
+    // Step 1: Pre-calculate total and validate product pricing
     let totalAmount = 0;
-
-    // Baseline: Non-atomic deduction loop vulnerable to partial failure state
     for (const item of items) {
       const product = db.products.get(item.productId);
       if (!product) {
-        throw new Error(`Product ${item.productId} not found`);
+        throw new Error(`Product ${item.productId} not found in catalog`);
       }
-
-      const success = await inventoryService.deductStock(item.productId, item.quantity);
-      if (!success) {
-        throw new Error(`Insufficient inventory for product ${product.title}`);
-      }
-
       totalAmount += product.price * item.quantity;
     }
 
-    const newOrder: Order = {
-      id: `ord_${Date.now()}`,
-      userId,
-      items,
-      totalAmount: Math.round(totalAmount * 100) / 100,
-      status: 'confirmed',
-      createdAt: new Date().toISOString(),
-    };
+    // Step 2: Atomic inventory reservation (2-phase commit phase 1)
+    const reservation = await inventoryService.reserveItemsAtomic(items);
+    if (!reservation.success) {
+      throw new Error(`Inventory reservation failed: ${reservation.error}`);
+    }
 
-    db.orders.set(newOrder.id, newOrder);
-    return newOrder;
+    try {
+      // Step 3: Create order record
+      const newOrder: Order = {
+        id: `ord_${Date.now()}`,
+        userId,
+        items,
+        totalAmount: Math.round(totalAmount * 100) / 100,
+        status: 'confirmed',
+        createdAt: new Date().toISOString(),
+      };
+
+      db.orders.set(newOrder.id, newOrder);
+
+      // Step 4: Commit reservation (2-phase commit phase 2)
+      await inventoryService.commitReservation(items);
+
+      return newOrder;
+    } catch (err: any) {
+      // If saving order fails, release reserved inventory
+      await inventoryService.releaseReservation(items);
+      throw new Error(`Failed to finalize order: ${err.message}`);
+    }
   }
 
   async getOrderById(orderId: string): Promise<Order | null> {
