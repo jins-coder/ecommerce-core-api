@@ -1,27 +1,143 @@
 import { db } from '../utils/db.js';
-import { InventoryItem } from '../models/types.js';
+import { InventoryItem, OrderItem } from '../models/types.js';
+
+function assertValidQuantity(item: OrderItem): void {
+  if (!item || typeof item.quantity !== 'number' || !Number.isInteger(item.quantity) || item.quantity <= 0) {
+    throw new Error(`Invalid quantity for item ${item?.productId || 'unknown'}: must be a positive integer`);
+  }
+}
 
 export class InventoryService {
   async getStock(productId: string): Promise<InventoryItem | null> {
     return db.inventory.get(productId) || null;
   }
 
-  // Baseline implementation lacks atomic concurrency checks and transaction rollback
-  async deductStock(productId: string, quantity: number): Promise<boolean> {
-    const item = db.inventory.get(productId);
-    if (!item) {
-      return false;
+  /**
+   * Atomic multi-item inventory reservation with optimistic concurrency control,
+   * quantity validation, duplicate line aggregation, and automated compensation rollback.
+   */
+  async reserveItemsAtomic(items: OrderItem[]): Promise<{ success: boolean; error?: string; reservedItems?: { productId: string; quantity: number }[] }> {
+    const rollbackLog: { productId: string; quantity: number }[] = [];
+
+    try {
+      // Step 1: Aggregate duplicate line items and strictly validate quantities upfront
+      const aggregated = new Map<string, number>();
+      for (const item of items) {
+        assertValidQuantity(item);
+        aggregated.set(item.productId, (aggregated.get(item.productId) || 0) + item.quantity);
+      }
+
+      // Step 2: Validate available stock and snapshot versions for optimistic locking
+      const versionSnapshots = new Map<string, number>();
+      for (const [productId, totalQty] of aggregated.entries()) {
+        const stockItem = db.inventory.get(productId);
+        if (!stockItem) {
+          throw new Error(`Item ${productId} does not exist in inventory catalog`);
+        }
+
+        const available = stockItem.availableStock - stockItem.reservedStock;
+        if (available < totalQty) {
+          throw new Error(`Insufficient stock for product ${productId}. Requested: ${totalQty}, Available: ${available}`);
+        }
+
+        // Snapshot version for optimistic locking comparison in Step 3
+        versionSnapshots.set(productId, stockItem.version);
+      }
+
+      // Step 3: Atomic reservation execution verifying version match
+      for (const [productId, totalQty] of aggregated.entries()) {
+        const stockItem = db.inventory.get(productId)!;
+        const expectedVersion = versionSnapshots.get(productId);
+
+        if (stockItem.version !== expectedVersion) {
+          throw new Error(`Concurrency conflict detected on product ${productId}: stock was modified concurrently`);
+        }
+
+        const previousReserved = stockItem.reservedStock;
+        const previousVersion = stockItem.version;
+
+        stockItem.reservedStock += totalQty;
+        stockItem.version += 1;
+        stockItem.updatedAt = new Date().toISOString();
+
+        try {
+          db.inventory.set(productId, stockItem);
+          rollbackLog.push({ productId, quantity: totalQty });
+        } catch (writeErr) {
+          // Revert in-memory mutation of current failed item
+          stockItem.reservedStock = previousReserved;
+          stockItem.version = previousVersion;
+          throw writeErr;
+        }
+      }
+
+      return { success: true, reservedItems: rollbackLog };
+    } catch (err: any) {
+      // Automatic compensation / rollback of previously reserved items in this transaction
+      const compensationErrors: string[] = [];
+      for (const logged of rollbackLog) {
+        const stockItem = db.inventory.get(logged.productId);
+        if (stockItem) {
+          stockItem.reservedStock = Math.max(0, stockItem.reservedStock - logged.quantity);
+          stockItem.updatedAt = new Date().toISOString();
+          try {
+            db.inventory.set(logged.productId, stockItem);
+          } catch (compErr: any) {
+            compensationErrors.push(`Failed to compensate reservation on ${logged.productId}: ${compErr.message}`);
+          }
+        }
+      }
+
+      const errorMessage = compensationErrors.length > 0
+        ? `${err.message} | Critical: Rollback compensation incomplete: ${compensationErrors.join(', ')}`
+        : err.message;
+
+      return { success: false, error: errorMessage };
+    }
+  }
+
+  /**
+   * Finalizes reservation into permanent stock deduction upon successful order completion.
+   * Validates all items upfront before applying deductions to prevent partial commits.
+   */
+  async commitReservation(items: OrderItem[]): Promise<void> {
+    // Step 1: Pre-validate all items to ensure zero partial mutations
+    for (const item of items) {
+      assertValidQuantity(item);
     }
 
-    if (item.availableStock < quantity) {
-      return false;
+    // Step 2: Apply mutations
+    for (const item of items) {
+      const stockItem = db.inventory.get(item.productId);
+      if (stockItem) {
+        stockItem.availableStock = Math.max(0, stockItem.availableStock - item.quantity);
+        stockItem.reservedStock = Math.max(0, stockItem.reservedStock - item.quantity);
+        stockItem.version += 1;
+        stockItem.updatedAt = new Date().toISOString();
+        db.inventory.set(item.productId, stockItem);
+      }
+    }
+  }
+
+  /**
+   * Explicitly releases reserved items if order or payment gets cancelled.
+   * Validates all items upfront before applying releases.
+   */
+  async releaseReservation(items: OrderItem[]): Promise<void> {
+    // Step 1: Pre-validate all items upfront
+    for (const item of items) {
+      assertValidQuantity(item);
     }
 
-    // Direct mutation without optimistic locking
-    item.availableStock -= quantity;
-    item.updatedAt = new Date().toISOString();
-    db.inventory.set(productId, item);
-    return true;
+    // Step 2: Apply releases
+    for (const item of items) {
+      const stockItem = db.inventory.get(item.productId);
+      if (stockItem) {
+        stockItem.reservedStock = Math.max(0, stockItem.reservedStock - item.quantity);
+        stockItem.updatedAt = new Date().toISOString();
+        db.inventory.set(item.productId, stockItem);
+      }
+    }
   }
 }
 
